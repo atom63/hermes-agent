@@ -509,6 +509,32 @@ def _format_gateway_process_notification(evt: dict) -> "str | None":
     return None
 
 
+def _cleanup_gateway_async_clients(*, final: bool = False) -> None:
+    """Best-effort cleanup for cached async auxiliary clients.
+
+    Gateway turns often execute agent work in short-lived worker loops. Those
+    loops can leave behind per-loop cached AsyncOpenAI/httpx clients unless we
+    explicitly evict stale entries after each turn. On shutdown, also close
+    any remaining cached clients so transports are released before exit.
+    """
+    try:
+        from agent.auxiliary_client import cleanup_stale_async_clients
+
+        cleanup_stale_async_clients()
+    except Exception:
+        pass
+
+    if not final:
+        return
+
+    try:
+        from agent.auxiliary_client import shutdown_cached_clients
+
+        shutdown_cached_clients()
+    except Exception:
+        pass
+
+
 class GatewayRunner:
     """
     Main gateway controller.
@@ -2333,6 +2359,8 @@ class GatewayRunner:
                 cleanup_all_browsers()
             except Exception:
                 pass
+
+            _cleanup_gateway_async_clients(final=True)
 
             from gateway.status import remove_pid_file
             remove_pid_file()
@@ -5690,6 +5718,7 @@ class GatewayRunner:
 
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(None, run_sync)
+            _cleanup_gateway_async_clients()
 
             response = result.get("final_response", "") if result else ""
             if not response and result and result.get("error"):
@@ -5745,6 +5774,7 @@ class GatewayRunner:
                 )
 
         except Exception as e:
+            _cleanup_gateway_async_clients()
             logger.exception("Background task %s failed", task_id)
             try:
                 await adapter.send(
@@ -5873,6 +5903,7 @@ class GatewayRunner:
 
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(None, run_sync)
+            _cleanup_gateway_async_clients()
 
             response = (result.get("final_response") or "") if result else ""
             if not response and result and result.get("error"):
@@ -5911,6 +5942,7 @@ class GatewayRunner:
                     pass
 
         except Exception as e:
+            _cleanup_gateway_async_clients()
             logger.exception("/btw task %s failed", task_id)
             try:
                 await adapter.send(
@@ -9315,6 +9347,8 @@ class GatewayRunner:
                         await task
                     except asyncio.CancelledError:
                         pass
+
+            _cleanup_gateway_async_clients()
 
         # If streaming already delivered the response, mark it so the
         # caller's send() is skipped (avoiding duplicate messages).
